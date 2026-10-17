@@ -1,0 +1,33 @@
+name: Checkout tests
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm test -- --runInBand
+      - run: npm run build
+      - run: git diff --exit-code -- dist
+      - name: Check out through this action without a Composal mount
+        id: fallback
+        uses: ./
+        with:
+          path: fallback-checkout
+          persist-credentials: false
+      - name: Verify fallback identity
+        env:
+          CHECKOUT_SOURCE: ${{ steps.fallback.outputs.checkout-source }}
+        run: |
+          test "$CHECKOUT_SOURCE" = github
+          test "$(git -C fallback-checkout rev-parse HEAD)" = "$GITHUB_SHA"
