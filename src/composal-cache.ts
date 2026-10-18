@@ -185,9 +185,9 @@ export class CheckoutCache {
     for (const [name, value] of Object.entries(refs)) {
       if (!oid.test(value) || !name.startsWith('refs/'))
         throw new Error('Invalid checkout cache ref')
-      run(['check-ref-format', name], localOrigin)
       commands.push(`create ${name} ${value}`)
     }
+    // update-ref validates the complete batch, including every ref name.
     run(['update-ref', '--stdin'], localOrigin, commands.join('\n') + '\n')
     const alternateFile = path.join(
       workspace,
