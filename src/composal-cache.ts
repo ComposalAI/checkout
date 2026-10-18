@@ -19,12 +19,17 @@ type FetchOptions = {
   showProgress?: boolean
 }
 
-function run(args: string[], cwd: string, input?: string): string {
+function run(
+  args: string[],
+  cwd: string,
+  input?: string,
+  timeout = 60_000
+): string {
   const result = spawnSync('git', ['-c', `safe.directory=${cwd}`, ...args], {
     cwd,
     input,
     encoding: 'utf8',
-    timeout: 60_000,
+    timeout,
     maxBuffer: 16 * 1024 * 1024
   })
   if (result.status !== 0)
@@ -67,12 +72,7 @@ export async function prepare(
   try {
     await fs.access(cacheRoot)
     let manifest: Manifest | undefined
-    if (
-      oid.test(settings.commit) &&
-      settings.fetchDepth > 0 &&
-      !settings.fetchTags &&
-      !settings.ref.startsWith('refs/tags/')
-    ) {
+    if (oid.test(settings.commit) && !settings.ref.startsWith('refs/tags/')) {
       try {
         const marker = JSON.parse(
           await fs.readFile(
@@ -92,8 +92,37 @@ export async function prepare(
               : {},
             cache_hit: true
           }
+          if (settings.fetchDepth <= 0 || settings.fetchTags) {
+            // A fresh advertisement preserves branch/tag freshness. The mounted
+            // completion markers prove their entire object graphs are present.
+            // No preparation task is needed for an already populated cache.
+            const advertised = run(
+              ['ls-remote', '--refs', 'origin', 'refs/heads/*', 'refs/tags/*'],
+              settings.repositoryPath,
+              undefined,
+              5000
+            )
+            const refs: Record<string, string> = {}
+            for (const line of advertised.split('\n').filter(Boolean)) {
+              const [value, name] = line.split('\t')
+              if (
+                !oid.test(value) ||
+                !name?.startsWith('refs/') ||
+                /[\x00-\x20\x7f]/.test(name)
+              )
+                throw new Error('Invalid advertised checkout ref')
+              refs[name] = value
+            }
+            const completed = new Set(
+              await fs.readdir(path.join(cacheRoot, 'complete'))
+            )
+            if (!Object.values(refs).every(value => completed.has(value)))
+              throw new Error('Advertised refs need cache preparation')
+            manifest.refs = {...refs, ...manifest.refs}
+          }
         }
       } catch {
+        manifest = undefined
         /* A cold cache is prepared outside the workflow container. */
       }
     }
