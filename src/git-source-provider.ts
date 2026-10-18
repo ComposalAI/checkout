@@ -178,7 +178,11 @@ export async function getSource(settings: IGitSourceSettings): Promise<void> {
       refSpec,
       options
     ) => {
-      if (!(await checkoutCache?.fetch(refSpec, options))) {
+      if (checkoutCache) {
+        await checkoutCache.fetch(refSpec, options, () =>
+          git.fetch(refSpec, options)
+        )
+      } else {
         core.setOutput('checkout-source', 'github')
         await git.fetch(refSpec, options)
       }

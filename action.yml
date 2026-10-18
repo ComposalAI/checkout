@@ -5,7 +5,7 @@ inputs:
     description: Copy borrowed Git objects locally for later container actions
     default: false
   cache-wait-seconds:
-    description: Seconds to wait for cold cache preparation before fetching from GitHub (0 to 300)
+    description: Seconds to wait for missing Git objects to be prepared before fetching from GitHub (0 to 300)
     default: 10
   repository:
     description: 'Repository name with owner. For example, actions/checkout'
@@ -114,6 +114,8 @@ inputs:
       only after reviewing the risks at https://gh.io/securely-using-pull_request_target.
     default: false
 outputs:
+  cache-available:
+    description: Whether checkout attached the mounted Git object cache, including during incremental GitHub fetches
   cache-hit:
     description: Whether the requested Git objects were already cached
   checkout-source:

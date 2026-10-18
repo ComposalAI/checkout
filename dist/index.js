@@ -42188,6 +42188,8 @@ function ref_helper_select(obj, path) {
 
 ;// CONCATENATED MODULE: external "node:child_process"
 const external_node_child_process_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:child_process");
+// EXTERNAL MODULE: external "node:crypto"
+var external_node_crypto_ = __nccwpck_require__(7598);
 ;// CONCATENATED MODULE: external "node:fs/promises"
 const promises_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:fs/promises");
 ;// CONCATENATED MODULE: external "node:path"
@@ -42200,11 +42202,13 @@ var external_node_url_ = __nccwpck_require__(3136);
 
 
 
+
 const root = '/opt/composal/git-cache';
 const oid = /^[0-9a-f]{40}$/;
-function run(args, cwd, input, timeout = 60_000) {
+function run(args, cwd, input, timeout = 60_000, environment = {}) {
     const result = (0,external_node_child_process_namespaceObject.spawnSync)('git', ['-c', `safe.directory=${cwd}`, ...args], {
         cwd,
+        env: { ...process.env, ...environment },
         input,
         encoding: 'utf8',
         timeout,
@@ -42228,8 +42232,57 @@ async function composal_cache_request(body, deadline) {
         throw new Error('Checkout cache unavailable');
     return response.json();
 }
+async function mountedTip(settings, cacheRoot) {
+    const objects = external_node_path_namespaceObject.resolve(cacheRoot, 'objects');
+    try {
+        if (!(await promises_namespaceObject.stat(objects)).isDirectory())
+            return;
+    }
+    catch {
+        return;
+    }
+    const hint = (0,external_node_crypto_.createHash)('sha256')
+        .update(settings.ref || settings.commit)
+        .digest('hex');
+    const candidates = [settings.commit];
+    for (const name of [hint, 'recent']) {
+        try {
+            candidates.push(JSON.parse(await promises_namespaceObject.readFile(external_node_path_namespaceObject.join(cacheRoot, 'hints', name), 'utf8')));
+        }
+        catch {
+            /* This repository may not have a previous completed preparation. */
+        }
+    }
+    for (const candidate of candidates) {
+        if (typeof candidate !== 'string' || !oid.test(candidate))
+            continue;
+        try {
+            await promises_namespaceObject.access(external_node_path_namespaceObject.join(cacheRoot, 'complete', candidate));
+            return run(['rev-parse', '--verify', `${candidate}^{commit}`], settings.repositoryPath, undefined, 5000, { GIT_OBJECT_DIRECTORY: objects });
+        }
+        catch {
+            /* A hint alone does not prove its objects are readable. */
+        }
+    }
+}
+async function attachAlternate(workspace, cacheRoot) {
+    const alternateFile = external_node_path_namespaceObject.join(workspace, '.git', 'objects', 'info', 'alternates');
+    let previous = '';
+    try {
+        previous = await promises_namespaceObject.readFile(alternateFile, 'utf8');
+    }
+    catch {
+        /* New checkout. */
+    }
+    await promises_namespaceObject.mkdir(external_node_path_namespaceObject.dirname(alternateFile), { recursive: true });
+    await promises_namespaceObject.writeFile(alternateFile, previous +
+        (previous && !previous.endsWith('\n') ? '\n' : '') +
+        `${external_node_path_namespaceObject.resolve(cacheRoot, 'objects')}\n`);
+    return { alternateFile, previous };
+}
 async function prepare(settings, cacheRoot = root) {
     setOutput('cache-hit', false);
+    setOutput('cache-available', false);
     const repository = `${settings.repositoryOwner}/${settings.repositoryName}`;
     // All upstream inputs remain supported. These cases use the normal transport.
     if (repository.toLowerCase() !== process.env.GITHUB_REPOSITORY?.toLowerCase() ||
@@ -42284,7 +42337,7 @@ async function prepare(settings, cacheRoot = root) {
         if (!manifest) {
             if (!process.env.COMPOSAL_CHECKOUT_API_URL ||
                 !process.env.COMPOSAL_CHECKOUT_TOKEN)
-                return;
+                throw new Error('Checkout cache preparation unavailable');
             const wait = Number(getInput('cache-wait-seconds') || '10');
             if (!Number.isFinite(wait) || wait < 0 || wait > 300)
                 throw new Error('Invalid cache wait');
@@ -42312,11 +42365,24 @@ async function prepare(settings, cacheRoot = root) {
             throw new Error('Invalid checkout cache identity');
         const cache = await CheckoutCache.create(settings.repositoryPath, manifest, cacheRoot);
         setOutput('cache-hit', manifest.cache_hit === true);
+        setOutput('cache-available', true);
         info(`Composal checkout: ${manifest.cache_hit ? 'warm' : 'prepared'} Git object cache`);
         return cache;
     }
     catch {
-        info('Composal checkout cache unavailable; fetching from GitHub.');
+        try {
+            const tip = await mountedTip(settings, cacheRoot);
+            if (tip) {
+                const cache = await CheckoutCache.incremental(settings.repositoryPath, tip, cacheRoot);
+                setOutput('cache-available', true);
+                info('Composal checkout: requested refs are not ready; reusing mounted Git objects for an incremental GitHub fetch.');
+                return cache;
+            }
+        }
+        catch {
+            /* The mount is unavailable; the normal GitHub transport still works. */
+        }
+        info('Composal checkout: no usable mounted Git object cache; fetching from GitHub.');
         setOutput('cache-hit', false);
         return;
     }
@@ -42324,16 +42390,22 @@ async function prepare(settings, cacheRoot = root) {
 class CheckoutCache {
     workspace;
     localOrigin;
-    manifest;
+    commit;
     alternateFile;
     previousAlternates;
-    enabled = true;
-    constructor(workspace, localOrigin, manifest, alternateFile, previousAlternates) {
+    localFetchEnabled = true;
+    constructor(workspace, localOrigin, commit, alternateFile, previousAlternates) {
         this.workspace = workspace;
         this.localOrigin = localOrigin;
-        this.manifest = manifest;
+        this.commit = commit;
         this.alternateFile = alternateFile;
         this.previousAlternates = previousAlternates;
+    }
+    static async incremental(workspace, commit, cacheRoot = root) {
+        if (!oid.test(commit))
+            throw new Error('Invalid checkout cache identity');
+        const { alternateFile, previous } = await attachAlternate(workspace, cacheRoot);
+        return new CheckoutCache(workspace, undefined, commit, alternateFile, previous);
     }
     static async create(workspace, manifest, cacheRoot = root) {
         const localOrigin = await promises_namespaceObject.mkdtemp(external_node_path_namespaceObject.join(process.env.RUNNER_TEMP || '/tmp', 'composal-checkout-'));
@@ -42352,65 +42424,63 @@ class CheckoutCache {
         }
         // update-ref validates the complete batch, including every ref name.
         run(['update-ref', '--stdin'], localOrigin, commands.join('\n') + '\n');
-        const alternateFile = external_node_path_namespaceObject.join(workspace, '.git', 'objects', 'info', 'alternates');
-        let previous = '';
-        try {
-            previous = await promises_namespaceObject.readFile(alternateFile, 'utf8');
-        }
-        catch {
-            /* New checkout. */
-        }
-        await promises_namespaceObject.mkdir(external_node_path_namespaceObject.dirname(alternateFile), { recursive: true });
-        await promises_namespaceObject.writeFile(alternateFile, previous +
-            (previous && !previous.endsWith('\n') ? '\n' : '') +
-            `${objects}\n`);
-        return new CheckoutCache(workspace, localOrigin, manifest, alternateFile, previous);
+        const { alternateFile, previous } = await attachAlternate(workspace, cacheRoot);
+        return new CheckoutCache(workspace, localOrigin, manifest.commit, alternateFile, previous);
     }
-    async fetch(refSpec, options) {
-        if (!this.enabled)
-            return false;
-        const seed = 'refs/composal/cache-seed';
+    async fetch(refSpec, options, fetchFromGitHub) {
+        const seed = `refs/composal/cache-seed-${(0,external_node_crypto_.randomUUID)()}`;
+        let seeded = false;
         try {
-            run(['update-ref', seed, this.manifest.commit], this.workspace);
-            const args = [
-                '-c',
-                'protocol.version=2',
-                'fetch',
-                '--no-tags',
-                '--no-recurse-submodules'
-            ];
-            if (options.fetchDepth && options.fetchDepth > 0)
-                args.push(`--depth=${options.fetchDepth}`);
-            else {
+            try {
+                run(['update-ref', seed, this.commit], this.workspace);
+                seeded = true;
+            }
+            catch {
+                this.localFetchEnabled = false;
+            }
+            if (this.localFetchEnabled && this.localOrigin) {
                 try {
-                    await promises_namespaceObject.access(external_node_path_namespaceObject.join(this.workspace, '.git', 'shallow'));
-                    args.push('--unshallow');
+                    const args = [
+                        '-c',
+                        'protocol.version=2',
+                        'fetch',
+                        '--no-tags',
+                        '--no-recurse-submodules'
+                    ];
+                    if (options.fetchDepth && options.fetchDepth > 0)
+                        args.push(`--depth=${options.fetchDepth}`);
+                    else {
+                        try {
+                            await promises_namespaceObject.access(external_node_path_namespaceObject.join(this.workspace, '.git', 'shallow'));
+                            args.push('--unshallow');
+                        }
+                        catch {
+                            /* Full checkout. */
+                        }
+                    }
+                    if (options.filter)
+                        args.push(`--filter=${options.filter}`);
+                    args.push((0,external_node_url_.pathToFileURL)(this.localOrigin).href, ...refSpec);
+                    run(args, this.workspace);
+                    setOutput('checkout-source', 'cache');
+                    return true;
                 }
                 catch {
-                    /* Full checkout. */
+                    this.localFetchEnabled = false;
+                    info('Composal checkout: local cache could not supply this ref; retaining mounted objects for a GitHub fetch.');
                 }
             }
-            if (options.filter)
-                args.push(`--filter=${options.filter}`);
-            args.push((0,external_node_url_.pathToFileURL)(this.localOrigin).href, ...refSpec);
-            run(args, this.workspace);
-            setOutput('checkout-source', 'cache');
-            return true;
-        }
-        catch {
-            this.enabled = false;
-            await promises_namespaceObject.writeFile(this.alternateFile, this.previousAlternates);
-            info('Composal checkout cache could not supply this ref; fetching from GitHub.');
+            setOutput('cache-hit', false);
             setOutput('checkout-source', 'github');
+            await fetchFromGitHub?.();
             return false;
         }
         finally {
-            run(['update-ref', '-d', seed], this.workspace);
+            if (seeded)
+                run(['update-ref', '-d', seed], this.workspace);
         }
     }
     async dissociate() {
-        if (!this.enabled)
-            return;
         run(['repack', '-a', '-d'], this.workspace);
         await promises_namespaceObject.writeFile(this.alternateFile, this.previousAlternates);
     }
@@ -42532,7 +42602,10 @@ async function getSource(settings) {
         // Fetch
         const checkoutCache = await prepare(settings);
         const fetchRepository = async (refSpec, options) => {
-            if (!(await checkoutCache?.fetch(refSpec, options))) {
+            if (checkoutCache) {
+                await checkoutCache.fetch(refSpec, options, () => git.fetch(refSpec, options));
+            }
+            else {
                 setOutput('checkout-source', 'github');
                 await git.fetch(refSpec, options);
             }

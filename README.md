@@ -34,10 +34,14 @@ platform refs are excluded. Credentials are never stored in the shared cache.
 Full-history checkouts confirm the current branches and tags before using the
 mounted objects. When every advertised tip is cached, they skip preparation.
 
-The first checkout of a commit can wait up to 10 seconds for preparation, then
-fetch from GitHub while preparation continues for later jobs. Cache preparation
-and cache-fetch failures fall back to the standard transport. For large cold
-repositories, increase the preparation wait:
+When preparation is still pending after the configured wait, checkout keeps any
+completed cached history attached and fetches missing objects from GitHub. A
+verified cached tip helps Git negotiate that fetch. Preparation continues for
+later jobs. A failed local-cache fetch also retains the mounted objects.
+
+The preparation wait defaults to 10 seconds. Set `cache-wait-seconds: 0` to start
+the GitHub fetch immediately, reusing mounted history when available. For a large
+cold repository, increase the wait:
 
 ```yaml
 - uses: composalai/checkout@1
@@ -70,8 +74,11 @@ cache. Objects remain available to concurrent jobs.
 ## Outputs
 
 - `commit` and `ref`: standard checkout outputs.
-- `cache-hit`: whether the requested Git objects were already cached.
-- `checkout-source`: `cache` or `github`.
+- `cache-available`: whether checkout attached the mounted Git object cache.
+- `cache-hit`: whether the requested Git objects were already cached. A missing
+  commit can report `false` while `cache-available` is `true`.
+- `checkout-source`: `cache` or `github`. A GitHub fetch can still reuse mounted
+  objects when `cache-available` is `true`.
 
 See the [runner guide](https://composal.ai/docs/github-actions-runners#checkout-cache)
 for runner setup and cache behavior.
