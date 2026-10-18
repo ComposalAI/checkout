@@ -42284,7 +42284,7 @@ async function prepare(settings, cacheRoot = root) {
         if (!manifest) {
             if (!process.env.COMPOSAL_CHECKOUT_API_URL ||
                 !process.env.COMPOSAL_CHECKOUT_TOKEN)
-                return;
+                throw new Error('Checkout cache preparation API unavailable');
             const wait = Number(getInput('cache-wait-seconds') || '10');
             if (!Number.isFinite(wait) || wait < 0 || wait > 300)
                 throw new Error('Invalid cache wait');
@@ -42316,6 +42316,12 @@ async function prepare(settings, cacheRoot = root) {
         return cache;
     }
     catch {
+        const partial = await CheckoutCache.available(settings.repositoryPath, cacheRoot);
+        if (partial) {
+            info('Composal checkout: partial Git object cache; fetching missing objects from GitHub.');
+            setOutput('cache-hit', false);
+            return partial;
+        }
         info('Composal checkout cache unavailable; fetching from GitHub.');
         setOutput('cache-hit', false);
         return;
@@ -42334,6 +42340,34 @@ class CheckoutCache {
         this.manifest = manifest;
         this.alternateFile = alternateFile;
         this.previousAlternates = previousAlternates;
+    }
+    static async available(workspace, cacheRoot = root) {
+        try {
+            // Only completed graphs can supply negotiation tips while another target
+            // is still being prepared. Bound the refs advertised by each checkout.
+            const refs = {};
+            const complete = await promises_namespaceObject.opendir(external_node_path_namespaceObject.join(cacheRoot, 'complete'));
+            for await (const entry of complete) {
+                if (!entry.isFile() || !oid.test(entry.name))
+                    continue;
+                refs[`refs/composal/cached/${entry.name}`] = entry.name;
+                if (Object.keys(refs).length >= 32)
+                    break;
+            }
+            const commit = Object.values(refs)[0];
+            if (!commit)
+                return;
+            return await CheckoutCache.create(workspace, {
+                commit,
+                object_oid: commit,
+                refs,
+                cache_hit: false,
+                incremental: true
+            }, cacheRoot);
+        }
+        catch {
+            return;
+        }
     }
     static async create(workspace, manifest, cacheRoot = root) {
         const localOrigin = await promises_namespaceObject.mkdtemp(external_node_path_namespaceObject.join(process.env.RUNNER_TEMP || '/tmp', 'composal-checkout-'));
@@ -42363,11 +42397,11 @@ class CheckoutCache {
         await promises_namespaceObject.mkdir(external_node_path_namespaceObject.dirname(alternateFile), { recursive: true });
         await promises_namespaceObject.writeFile(alternateFile, previous +
             (previous && !previous.endsWith('\n') ? '\n' : '') +
-            `${objects}\n`);
+            `${external_node_path_namespaceObject.join(localOrigin, 'objects')}\n`);
         return new CheckoutCache(workspace, localOrigin, manifest, alternateFile, previous);
     }
     async fetch(refSpec, options) {
-        if (!this.enabled)
+        if (!this.enabled || this.manifest.incremental)
             return false;
         const seed = 'refs/composal/cache-seed';
         try {
@@ -42399,8 +42433,14 @@ class CheckoutCache {
         }
         catch {
             this.enabled = false;
-            await promises_namespaceObject.writeFile(this.alternateFile, this.previousAlternates);
-            info('Composal checkout cache could not supply this ref; fetching from GitHub.');
+            try {
+                run(['cat-file', '-e', `${this.manifest.commit}^{commit}`], this.localOrigin);
+                info('Composal checkout cache could not supply this ref; reusing cached objects while fetching from GitHub.');
+            }
+            catch {
+                await promises_namespaceObject.writeFile(this.alternateFile, this.previousAlternates);
+                info('Composal checkout cache unavailable; fetching from GitHub.');
+            }
             setOutput('checkout-source', 'github');
             return false;
         }
@@ -42409,8 +42449,6 @@ class CheckoutCache {
         }
     }
     async dissociate() {
-        if (!this.enabled)
-            return;
         run(['repack', '-a', '-d'], this.workspace);
         await promises_namespaceObject.writeFile(this.alternateFile, this.previousAlternates);
     }

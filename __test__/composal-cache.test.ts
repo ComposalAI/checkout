@@ -1,5 +1,6 @@
 import {afterEach, beforeEach, expect, jest, test} from '@jest/globals'
 import {spawnSync} from 'node:child_process'
+import {randomBytes} from 'node:crypto'
 import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
@@ -350,7 +351,7 @@ test('dissociate makes the checkout usable after the mounted cache disappears', 
   expect(git(['fsck', '--no-reflogs'])).not.toContain('missing')
 })
 
-test('cache fetch failure removes its alternate and allows normal GitHub fetching', async () => {
+test('a missing ref retains valid cached objects for incremental GitHub fetching', async () => {
   const checkout = await cache()
   expect(
     await checkout.fetch(
@@ -363,11 +364,11 @@ test('cache fetch failure removes its alternate and allows normal GitHub fetchin
       path.join(workspace, '.git', 'objects', 'info', 'alternates'),
       'utf8'
     )
-  ).toBe('')
+  ).toContain('composal-checkout-')
   expect(git(['for-each-ref', '--format=%(refname)'])).not.toContain(
     'cache-seed'
   )
-  git(['fetch', origin, 'main'])
+  git(['fetch', new URL(`file://${origin}`).href, 'main'])
   git(['checkout', '--detach', 'FETCH_HEAD'])
   expect(git(['rev-parse', 'HEAD'])).toBe(second)
 })
@@ -379,4 +380,119 @@ test('malformed cached ref metadata cannot write outside the temporary ref datab
   await expect(
     fs.access(path.join(workspace, '.git', 'objects', 'info', 'alternates'))
   ).rejects.toThrow()
+})
+
+test('a pending target reuses completed cached history and transfers only new objects', async () => {
+  const previous = {...process.env}
+  Object.assign(process.env, {
+    GITHUB_REPOSITORY: 'example/repo',
+    COMPOSAL_CHECKOUT_API_URL: 'https://composal.example/api/checkout',
+    COMPOSAL_CHECKOUT_TOKEN: 'fixture-token',
+    'INPUT_CACHE-WAIT-SECONDS': '0'
+  })
+  try {
+    const payload = randomBytes(1024 * 1024)
+    await fs.writeFile(path.join(origin, 'unchanged-large-file'), payload)
+    git(['add', '.'], origin)
+    git(['commit', '-m', 'cached baseline'], origin)
+    const base = git(['rev-parse', 'HEAD'], origin)
+    const blob = git(['rev-parse', 'HEAD:unchanged-large-file'], origin)
+    git(['fetch', 'origin', 'main:refs/heads/main'], cacheRoot)
+    await fs.mkdir(path.join(cacheRoot, 'complete'))
+    await fs.writeFile(path.join(cacheRoot, 'complete', base), '')
+    await fs.writeFile(path.join(origin, 'new-file'), 'new data')
+    git(['add', '.'], origin)
+    git(['commit', '-m', 'uncached target'], origin)
+    const target = git(['rev-parse', 'HEAD'], origin)
+    git(['remote', 'set-url', 'origin', new URL(`file://${origin}`).href])
+    jest.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({status: 'pending', ticket: 'fixture-ticket'})
+    } as Response)
+    const checkout = await prepare(
+      {
+        repositoryOwner: 'example',
+        repositoryName: 'repo',
+        repositoryPath: workspace,
+        ref: 'refs/heads/main',
+        commit: target,
+        fetchDepth: 128
+      } as IGitSourceSettings,
+      cacheRoot
+    )
+    expect(checkout).toBeInstanceOf(CheckoutCache)
+    expect(
+      await checkout!.fetch([`+${target}:refs/remotes/origin/main`], {
+        fetchDepth: 128
+      })
+    ).toBe(false)
+    const trace = path.join(temporary, 'packets.log')
+    const fetched = spawnSync(
+      'git',
+      [
+        '-c',
+        'protocol.version=2',
+        'fetch',
+        '--depth=128',
+        'origin',
+        `+${target}:refs/remotes/origin/main`
+      ],
+      {
+        cwd: workspace,
+        encoding: 'utf8',
+        env: {...process.env, GIT_TRACE_PACKET: trace}
+      }
+    )
+    expect(fetched.status).toBe(0)
+    expect(await fs.readFile(trace, 'utf8')).toContain(`have ${base}`)
+    git(['checkout', '--detach', 'refs/remotes/origin/main'])
+    expect(
+      await fs.readFile(path.join(workspace, 'unchanged-large-file'))
+    ).toEqual(payload)
+    expect(await fs.readFile(path.join(workspace, 'new-file'), 'utf8')).toBe(
+      'new data'
+    )
+    const counts = Object.fromEntries(
+      git(['count-objects', '-v'])
+        .split('\n')
+        .filter(line => line.includes(': '))
+        .map(line => line.split(': '))
+    )
+    expect(Number(counts.count) + Number(counts['in-pack'])).toBe(3)
+    await expect(
+      fs.access(
+        path.join(workspace, '.git', 'objects', blob.slice(0, 2), blob.slice(2))
+      )
+    ).rejects.toThrow()
+    expect(() => git(['cat-file', '-e', target], cacheRoot)).toThrow()
+    await checkout!.dissociate()
+    await fs.rename(cacheRoot, `${cacheRoot}-unmounted`)
+    expect(git(['show', 'HEAD:new-file'])).toBe('new data')
+    expect(git(['fsck', '--no-dangling', '--no-reflogs'])).not.toContain(
+      'missing'
+    )
+  } finally {
+    for (const key of Object.keys(process.env))
+      if (!(key in previous)) delete process.env[key]
+    Object.assign(process.env, previous)
+  }
+}, 30000)
+
+test('an unavailable object store detaches the cache and permits a normal fetch', async () => {
+  const checkout = await cache()
+  await fs.rename(cacheRoot, `${cacheRoot}-unmounted`)
+  expect(
+    await checkout.fetch([`+${second}:refs/remotes/origin/main`], {
+      fetchDepth: 1
+    })
+  ).toBe(false)
+  expect(
+    await fs.readFile(
+      path.join(workspace, '.git', 'objects', 'info', 'alternates'),
+      'utf8'
+    )
+  ).toBe('')
+  git(['fetch', origin, 'main'])
+  git(['checkout', '--detach', 'FETCH_HEAD'])
+  expect(git(['rev-parse', 'HEAD'])).toBe(second)
 })

@@ -35,8 +35,10 @@ Full-history checkouts confirm the current branches and tags before using the
 mounted objects. When every advertised tip is cached, they skip preparation.
 
 The first checkout of a commit can wait up to 10 seconds for preparation, then
-fetch from GitHub while preparation continues for later jobs. Cache preparation
-and cache-fetch failures fall back to the standard transport. For large cold
+fetch from GitHub while preparation continues for later jobs. If the exact target is not ready, completed cached graphs remain available to
+Git as negotiation tips. The normal GitHub transport fetches missing objects
+while reusing cached history, trees and blobs. A missing ref also retains a
+usable object cache. An absent or unusable cache uses the standard transport. For large cold
 repositories, increase the preparation wait:
 
 ```yaml
@@ -70,8 +72,10 @@ cache. Objects remain available to concurrent jobs.
 ## Outputs
 
 - `commit` and `ref`: standard checkout outputs.
-- `cache-hit`: whether the requested Git objects were already cached.
-- `checkout-source`: `cache` or `github`.
+- `cache-hit`: whether the requested Git objects were already cached. A false
+  value can still reuse older cached objects for an incremental GitHub fetch.
+- `checkout-source`: `cache` or `github`. `github` identifies the transport for
+  missing objects; it does not imply that the entire repository was downloaded.
 
 See the [runner guide](https://composal.ai/docs/github-actions-runners#checkout-cache)
 for runner setup and cache behavior.
