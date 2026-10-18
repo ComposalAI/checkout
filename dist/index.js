@@ -42327,7 +42327,9 @@ class CheckoutCache {
         const refs = { ...manifest.refs, 'refs/composal/target': manifest.object_oid };
         const commands = [];
         for (const [name, value] of Object.entries(refs)) {
-            if (!oid.test(value) || !name.startsWith('refs/'))
+            if (!oid.test(value) ||
+                !name.startsWith('refs/') ||
+                /[\x00-\x20\x7f]/.test(name))
                 throw new Error('Invalid checkout cache ref');
             commands.push(`create ${name} ${value}`);
         }

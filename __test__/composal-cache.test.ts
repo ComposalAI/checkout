@@ -277,7 +277,7 @@ test('cache fetch failure removes its alternate and allows normal GitHub fetchin
 
 test('malformed cached ref metadata cannot write outside the temporary ref database', async () => {
   await expect(
-    cache({'refs/heads/main\ncreate refs/heads/injected': second})
+    cache({[`refs/heads/main ${second}\ncreate refs/heads/injected`]: second})
   ).rejects.toThrow()
   await expect(
     fs.access(path.join(workspace, '.git', 'objects', 'info', 'alternates'))
