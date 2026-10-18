@@ -42327,11 +42327,13 @@ class CheckoutCache {
         const refs = { ...manifest.refs, 'refs/composal/target': manifest.object_oid };
         const commands = [];
         for (const [name, value] of Object.entries(refs)) {
-            if (!oid.test(value) || !name.startsWith('refs/'))
+            if (!oid.test(value) ||
+                !name.startsWith('refs/') ||
+                /[\x00-\x20\x7f]/.test(name))
                 throw new Error('Invalid checkout cache ref');
-            run(['check-ref-format', name], localOrigin);
             commands.push(`create ${name} ${value}`);
         }
+        // update-ref validates the complete batch, including every ref name.
         run(['update-ref', '--stdin'], localOrigin, commands.join('\n') + '\n');
         const alternateFile = external_node_path_namespaceObject.join(workspace, '.git', 'objects', 'info', 'alternates');
         let previous = '';

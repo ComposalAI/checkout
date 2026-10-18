@@ -233,6 +233,12 @@ test('full history, annotated tags and sparse checkout keep standard Git behavio
   await expect(fs.access(path.join(workspace, 'root-file'))).rejects.toThrow()
 })
 
+test('bulk ref creation rejects invalid names without publishing local refs', async () => {
+  await expect(
+    cache({'refs/heads/main': second, 'refs/heads/invalid..name': first})
+  ).rejects.toThrow('Local checkout cache operation failed')
+})
+
 test('dissociate makes the checkout usable after the mounted cache disappears', async () => {
   const checkout = await cache()
   expect(
@@ -271,7 +277,7 @@ test('cache fetch failure removes its alternate and allows normal GitHub fetchin
 
 test('malformed cached ref metadata cannot write outside the temporary ref database', async () => {
   await expect(
-    cache({'refs/heads/main\ncreate refs/heads/injected': second})
+    cache({[`refs/heads/main ${second}\ncreate refs/heads/injected`]: second})
   ).rejects.toThrow()
   await expect(
     fs.access(path.join(workspace, '.git', 'objects', 'info', 'alternates'))
