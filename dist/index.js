@@ -42202,12 +42202,12 @@ var external_node_url_ = __nccwpck_require__(3136);
 
 const root = '/opt/composal/git-cache';
 const oid = /^[0-9a-f]{40}$/;
-function run(args, cwd, input) {
+function run(args, cwd, input, timeout = 60_000) {
     const result = (0,external_node_child_process_namespaceObject.spawnSync)('git', ['-c', `safe.directory=${cwd}`, ...args], {
         cwd,
         input,
         encoding: 'utf8',
-        timeout: 60_000,
+        timeout,
         maxBuffer: 16 * 1024 * 1024
     });
     if (result.status !== 0)
@@ -42242,10 +42242,7 @@ async function prepare(settings, cacheRoot = root) {
     try {
         await promises_namespaceObject.access(cacheRoot);
         let manifest;
-        if (oid.test(settings.commit) &&
-            settings.fetchDepth > 0 &&
-            !settings.fetchTags &&
-            !settings.ref.startsWith('refs/tags/')) {
+        if (oid.test(settings.commit) && !settings.ref.startsWith('refs/tags/')) {
             try {
                 const marker = JSON.parse(await promises_namespaceObject.readFile(external_node_path_namespaceObject.join(cacheRoot, 'commits', settings.commit), 'utf8'));
                 if (marker.commit === settings.commit &&
@@ -42258,9 +42255,29 @@ async function prepare(settings, cacheRoot = root) {
                             : {},
                         cache_hit: true
                     };
+                    if (settings.fetchDepth <= 0 || settings.fetchTags) {
+                        // A fresh advertisement preserves branch/tag freshness. The mounted
+                        // completion markers prove their entire object graphs are present.
+                        // No preparation task is needed for an already populated cache.
+                        const advertised = run(['ls-remote', '--refs', 'origin', 'refs/heads/*', 'refs/tags/*'], settings.repositoryPath, undefined, 5000);
+                        const refs = {};
+                        for (const line of advertised.split('\n').filter(Boolean)) {
+                            const [value, name] = line.split('\t');
+                            if (!oid.test(value) ||
+                                !name?.startsWith('refs/') ||
+                                /[\x00-\x20\x7f]/.test(name))
+                                throw new Error('Invalid advertised checkout ref');
+                            refs[name] = value;
+                        }
+                        const completed = new Set(await promises_namespaceObject.readdir(external_node_path_namespaceObject.join(cacheRoot, 'complete')));
+                        if (!Object.values(refs).every(value => completed.has(value)))
+                            throw new Error('Advertised refs need cache preparation');
+                        manifest.refs = { ...refs, ...manifest.refs };
+                    }
                 }
             }
             catch {
+                manifest = undefined;
                 /* A cold cache is prepared outside the workflow container. */
             }
         }

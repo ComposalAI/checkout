@@ -184,6 +184,103 @@ test('a warm exact-commit checkout makes no cache API call', async () => {
   }
 })
 
+test('warm full history confirms live refs and uses mounted objects without preparation', async () => {
+  const previous = process.env.GITHUB_REPOSITORY
+  process.env.GITHUB_REPOSITORY = 'example/repo'
+  const tag = git(['rev-parse', 'refs/tags/v1'], origin)
+  git(['remote', 'set-url', 'origin', origin])
+  await fs.mkdir(path.join(cacheRoot, 'commits'))
+  await fs.mkdir(path.join(cacheRoot, 'complete'))
+  await fs.writeFile(
+    path.join(cacheRoot, 'commits', second),
+    JSON.stringify({commit: second, object_oid: second})
+  )
+  for (const value of [second, tag])
+    await fs.writeFile(path.join(cacheRoot, 'complete', value), '{}')
+  const request = jest
+    .spyOn(globalThis, 'fetch')
+    .mockRejectedValue(new Error('Preparation must not be called'))
+  try {
+    const result = await prepare(
+      {
+        repositoryOwner: 'example',
+        repositoryName: 'repo',
+        repositoryPath: workspace,
+        ref: 'refs/heads/main',
+        commit: second,
+        fetchDepth: 0
+      } as IGitSourceSettings,
+      cacheRoot
+    )
+    expect(result).toBeInstanceOf(CheckoutCache)
+    expect(request).not.toHaveBeenCalled()
+    expect(
+      await result!.fetch(
+        ['+refs/heads/*:refs/remotes/origin/*', '+refs/tags/*:refs/tags/*'],
+        {}
+      )
+    ).toBe(true)
+    git(['checkout', '--detach', 'refs/remotes/origin/main'])
+    expect(git(['rev-list', '--count', 'HEAD'])).toBe('2')
+    expect(git(['rev-parse', 'refs/tags/v1'])).toBe(tag)
+  } finally {
+    if (previous === undefined) delete process.env.GITHUB_REPOSITORY
+    else process.env.GITHUB_REPOSITORY = previous
+  }
+})
+
+test('full history prepares newly advertised tips even when the target commit is warm', async () => {
+  const previous = {...process.env}
+  Object.assign(process.env, {
+    GITHUB_REPOSITORY: 'example/repo',
+    COMPOSAL_CHECKOUT_API_URL: 'https://composal.example/api/checkout',
+    COMPOSAL_CHECKOUT_TOKEN: 'private-fixture-token'
+  })
+  git(['branch', 'new-branch', first], origin)
+  git(['remote', 'set-url', 'origin', origin])
+  const tag = git(['rev-parse', 'refs/tags/v1'], origin)
+  await fs.mkdir(path.join(cacheRoot, 'commits'))
+  await fs.mkdir(path.join(cacheRoot, 'complete'))
+  await fs.writeFile(
+    path.join(cacheRoot, 'commits', second),
+    JSON.stringify({commit: second, object_oid: second})
+  )
+  for (const value of [second, tag])
+    await fs.writeFile(path.join(cacheRoot, 'complete', value), '{}')
+  const request = jest.spyOn(globalThis, 'fetch').mockResolvedValue({
+    ok: true,
+    json: async () => ({
+      status: 'ready',
+      commit: second,
+      object_oid: second,
+      refs: {'refs/heads/main': second, 'refs/heads/new-branch': first}
+    })
+  } as Response)
+  try {
+    const result = await prepare(
+      {
+        repositoryOwner: 'example',
+        repositoryName: 'repo',
+        repositoryPath: workspace,
+        ref: 'refs/heads/main',
+        commit: second,
+        fetchDepth: 0
+      } as IGitSourceSettings,
+      cacheRoot
+    )
+    expect(result).toBeInstanceOf(CheckoutCache)
+    expect(request).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(request.mock.calls[0][1]!.body as string)).toMatchObject({
+      operation: 'prepare',
+      all_refs: true
+    })
+  } finally {
+    for (const key of Object.keys(process.env))
+      if (!(key in previous)) delete process.env[key]
+    Object.assign(process.env, previous)
+  }
+})
+
 async function cache(
   refs: Record<string, string> = {'refs/heads/main': second}
 ) {

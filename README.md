@@ -31,6 +31,9 @@ scope can read the cached source. Workflow code cannot update the cache. Only
 objects confirmed as readable from the GitHub repository enter it; unpublished
 platform refs are excluded. Credentials are never stored in the shared cache.
 
+Full-history checkouts confirm the current branches and tags before using the
+mounted objects. When every advertised tip is cached, they skip preparation.
+
 The first checkout of a commit can wait up to 10 seconds for preparation, then
 fetch from GitHub while preparation continues for later jobs. Cache preparation
 and cache-fetch failures fall back to the standard transport. For large cold

@@ -1,6 +1,6 @@
 {
   "name": "composal-checkout",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Composal Git checkout action",
   "type": "module",
   "main": "lib/main.js",
